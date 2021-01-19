@@ -1,0 +1,468 @@
+---
+title: <font size = "6">Demo of microbial fcm analysis pipeline</font>
+output:
+  html_document:
+    code_folding: show
+    highlight: haddock
+    keep_md: yes
+    theme: flatly
+    toc: yes
+    number_sections: true
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+      toc_depth: 3
+editor_options:
+  chunk_output_type: console
+---
+
+<style type="text/css">
+h1.title {
+  font-size: 38px;
+  color: black;
+  text-align: center;
+}
+
+</style>
+
+```{r setup-1, include=FALSE}
+knitr::opts_chunk$set(eval = TRUE, 
+                      echo = TRUE, 
+                      cache = FALSE, 
+                      include = TRUE, 
+                      collapse = FALSE, 
+                      dependson = NULL, 
+                      engine = "R", # Chunks will always have R code, unless noted
+                      error = TRUE,
+                      fig.path="./Figures/",  # Set the figure options
+                      fig.align = "center"
+                      )
+options(knitr.duplicate.label = "allow")
+```
+
+# Libraries
+
+```{r, include = TRUE, warning = FALSE, message = FALSE}
+library("Phenoflow")
+library("plyr")
+library("dplyr")
+library("ggplot2")
+library("flowAI")
+library("scales")
+library("plyr")
+library("cowplot")
+library("ggcyto")
+library("RColorBrewer")
+library("grid")
+library("tidyr")
+library("flowFP")
+library("FlowSOM")
+library("readxl")
+# for flowEMMI
+library("Rcpp")
+library("RcppEigen")
+library("mixtools")
+library("gtools")
+library("flowCore")
+library("flowViz")
+library("randomcoloR")
+sourceCpp("ext/flowEMMi.cpp")
+
+# Set seed for reproducible analysis
+set.seed(777)
+
+# For avoiding verbose console output
+run_quiet <- function (x) {
+  sink(tempfile())
+  on.exit(sink())
+  invisible(force(x))
+}
+
+# Import metadata
+metadata <- readxl::read_excel("./metadata.xlsx")
+metadata$Sample_names <- gsub(".5", "_5", metadata$Sample_names, fixed = TRUE)
+metadata$Sample_names <- gsub(".fcs", "_QC.fcs", metadata$Sample_names, fixed = TRUE)
+metadata$Treatment <- factor(metadata$Treatment,
+                             levels = c("Adaptation of AMC",
+                                        "AMC after temperature disturbance",
+                                        "AMC after pH disturbance",
+                                        "Adaptation of CMC",
+                                        "CMC after temperature disturbance",
+                                        "CMC after pH disturbance"))
+```
+
+# Preprocessing
+
+## Import data 
+
+Data set from [Liu et al (2017).](https://msphere.asm.org/content/3/1/e00564-17)
+
+```{r, include = TRUE, cache = TRUE, cache.lazy = FALSE}
+# Import data
+flowData <- read.flowSet(path = "data/zishu_2018/")
+param <- c("FS Log", "SS Log","FL 4 Log")
+sampleNames(flowData) <- gsub(".5", "_5", sampleNames(flowData), fixed = TRUE)
+```
+
+## Transform data 
+
+```{r, include = TRUE, cache = TRUE, cache.lazy = FALSE}
+# Transform data
+flowData_transformed_log <- transform(flowData,`FS Log`=log10(`FS Log`),
+                                   `SS Log`=log10(`SS Log`),
+                                   `FL 4 Log`=log10(`FL 4 Log`))
+flowData_transformed_asinh <- transform(flowData,`FS Log`=asinh(`FS Log`),
+                                   `SS Log`=asinh(`SS Log`),
+                                   `FL 4 Log`=asinh(`FL 4 Log`))
+```
+
+## Denoise data - step 1 {.tabset}
+
+### Untransformed data 
+
+```{r, include=TRUE}
+r_sam <- sample(1:length(flowData), 6)
+
+#  scatter plot
+p_scatter1 <- ggcyto::ggcyto(flowData[r_sam], aes(x = `FS Log`, y = `FL 4 Log`)) + 
+  geom_hex(bins = 300) +
+  theme_bw()+
+  labs(x = "Forward scatter (a.u.)", y = "DAPI (a.u.)")+
+  theme(axis.text = element_text(size = 12),
+        axis.title = element_text(size = 12),
+        strip.background = element_rect(colour="white", fill="white"),
+        panel.border = element_rect(colour = "white"))
+  # coord_cartesian(xlim = c(0,6), ylim = c(0,6))
+
+print(p_scatter1)
+
+```
+
+### Log-transformed data 
+
+```{r, include=TRUE}
+#  scatter plot
+p_scatter2 <- ggcyto::ggcyto(flowData_transformed_log[r_sam], aes(x = `FS Log`, y = `FL 4 Log`)) + 
+  geom_hex(bins = 300) +
+  theme_bw()+
+  labs(x = "Forward scatter (a.u.)", y = "DAPI (a.u.)")+
+  theme(axis.text = element_text(size = 12),
+        axis.title = element_text(size = 12),
+        strip.background = element_rect(colour="white", fill="white"),
+        panel.border = element_rect(colour = "white"))
+  # coord_cartesian(xlim = c(0,6), ylim = c(0,6))
+
+print(p_scatter2)
+```
+
+### asinh-transformed data 
+
+```{r, include=TRUE}
+#  scatter plot
+p_scatter3 <- ggcyto::ggcyto(flowData_transformed_asinh[r_sam], aes(x = `FS Log`, y = `FL 4 Log`)) + 
+  geom_hex(bins = 300) +
+  theme_bw()+
+  labs(x = "Forward scatter (a.u.)", y = "DAPI (a.u.)")+
+  theme(axis.text = element_text(size = 12),
+        axis.title = element_text(size = 12),
+        strip.background = element_rect(colour="white", fill="white"),
+        panel.border = element_rect(colour = "white"))
+  # coord_cartesian(xlim = c(0,6), ylim = c(0,6))
+
+print(p_scatter3)
+```
+
+## Denoise data - step 2 {.tabset}
+
+### Without gate
+
+```{r, include=TRUE}
+#  scatter plot
+p_scatter4 <- ggcyto::ggcyto(flowData_transformed_asinh[r_sam], aes(x = `FS Log`, y = `FL 4 Log`)) + 
+  geom_hex(bins = 300) +
+  theme_bw()+
+  labs(x = "Forward scatter (a.u.)", y = "DAPI (a.u.)")+
+  theme(axis.text = element_text(size = 12),
+        axis.title = element_text(size = 12),
+        strip.background = element_rect(colour="white", fill="white"),
+        panel.border = element_rect(colour = "white"))
+  # coord_cartesian(xlim = c(0,6), ylim = c(0,6))
+
+print(p_scatter4)
+```
+
+### With gate
+
+```{r, include=TRUE}
+# Create a PolygonGate for denoising the dataset
+polycut <- matrix(c(1.5, 1.5, 4, 4, 9, 9, 6.75, 6.75, 6.25, 6.25,
+  2.25, 6, 6, 8.75, 8.75, 2.25, 2.25, 2.75, 2.75, 2.25),
+     ncol = 2,
+     nrow = 10)
+colnames(polycut) <- c("FS Log", "FL 4 Log")
+polyGate <- polygonGate(.gate = polycut, filterId = "Cell population")
+
+#  scatter plot
+p_scatter5 <- ggcyto::ggcyto(flowData_transformed_asinh[r_sam], aes(x = `FS Log`, y = `FL 4 Log`)) + 
+  geom_hex(bins = 300) +
+  theme_bw()+
+  labs(x = "Forward scatter (a.u.)", y = "DAPI (a.u.)")+
+  theme(axis.text = element_text(size = 12),
+        axis.title = element_text(size = 12),
+        strip.background = element_rect(colour="white", fill="white"),
+        panel.border = element_rect(colour = "white"))+
+  # coord_cartesian(xlim = c(0,6), ylim = c(0,6))+
+  geom_gate(polyGate, col = "#CB0001", fill = "#ffa401", alpha = 0.8, size = 1)
+  
+print(p_scatter5)
+
+# Retain only events in gate
+flowData_transformed_asinh <- Subset(flowData_transformed_asinh, polyGate)
+```
+
+## Denoise data - step 3
+
+Doublet/clump removal not possible for this dataset due to lack of combined
+-A/-H parameters.
+
+## Denoise data - step 4 {.tabset}
+
+### Before flowAI
+
+```{r, include=TRUE}
+#  scatter plot
+p_scatter6 <- ggcyto::ggcyto(flowData_transformed_asinh[r_sam], aes(x = `TIME`, y = `FL 4 Log`)) + 
+  geom_hex(bins = 300) +
+  theme_bw()+
+  labs(x = "Time (ms)", y = "DAPI (a.u.)")+
+  theme(axis.text = element_text(size = 12),
+        axis.title = element_text(size = 12),
+        strip.background = element_rect(colour="white", fill="white"),
+        panel.border = element_rect(colour = "white"))
+
+print(p_scatter6)
+```
+
+```{r, include=TRUE, message =  FALSE, echo = FALSE, warning = FALSE, cache = TRUE, cache.lazy = FALSE}
+ChExcludeFM <- 
+  colnames(flowData_transformed_asinh)[!colnames(flowData_transformed_asinh) %in% param]
+
+# Use flowAI for removing anomalies from the data
+# flowData_transformed_asinh_dn <- run_quiet(flow_auto_qc(flowData_transformed_asinh, 
+#   output = 1,
+#   folder_results = "./data/QC_flowAI",
+#   ChExcludeFM = ChExcludeFM,
+#   timeCh = "TIME",
+#   second_fractionFR = "timestep"
+#   )
+# )
+
+flowData_transformed_asinh_dn <- read.flowSet(path = "./data/QC_flowAI", pattern = "_QC.fcs")
+```
+
+### After flowAI 
+
+```{r, include=TRUE}
+#  scatter plot
+p_scatter7 <- ggcyto::ggcyto(flowData_transformed_asinh_dn[r_sam], aes(x = `TIME`, y = `FL 4 Log`)) + 
+  geom_hex(bins = 300) +
+  theme_bw()+
+  labs(x = "Time (ms)", y = "DAPI (a.u.)")+
+  theme(axis.text = element_text(size = 12),
+        axis.title = element_text(size = 12),
+        strip.background = element_rect(colour="white", fill="white"),
+        panel.border = element_rect(colour = "white"))
+
+print(p_scatter7)
+```
+
+### QC stats
+
+```{r, include=TRUE}
+QC_stats <- read.delim("./data/QC_flowAI/QCmini.txt")
+
+p_qc1 <- QC_stats %>%
+  arrange(-X..anomalies) %>% 
+  mutate(Name.file = factor(Name.file, levels = unique(Name.file))) %>% 
+  ggplot(., aes(y = X..anomalies, x = Name.file))+
+  geom_point(shape = 21, size = 3, fill = "#ffa401", alpha = 0.5)+
+  theme_bw()+
+  theme(axis.text = element_text(size = 12),
+    axis.text.x = element_blank(),
+        axis.title = element_text(size = 12))+
+  labs(y = "% anomalies",  x = "Ranked samples")+
+  geom_hline(yintercept = 5, linetype = 2)
+
+p_qc2 <- QC_stats %>% 
+  ggplot(., aes(x = X..anomalies))+
+  geom_histogram(fill = "#ffa401", alpha = 0.5, col = "black")+
+  theme_bw()+
+  theme(axis.text = element_text(size = 12),
+        axis.title = element_text(size = 12))+
+  labs(x = "% anomalies",  y = "Number of samples")+
+  geom_vline(xintercept = median(QC_stats$X..anomalies), linetype = 2)+
+  scale_x_continuous(breaks = seq(from = 0, to = 100, by = 10), limits = c(-5,100))
+
+cowplot::plot_grid(p_qc1, p_qc2, align = "hv", ncol = 1)
+```
+
+# Cell density measurement
+
+Cell concentration estimates cannot be easily estimated for this dataset due to 
+a lack of volumetric measurements. We refer the reader to the original manuscript.
+
+```{r, include=TRUE}
+
+```
+
+# Cell population identification {.tabset}
+
+## FlowSOM - fig1
+```{r, include=TRUE, cache = TRUE, cache.lazy = TRUE, dpi = 500}
+fSOM <- FlowSOM(
+  input = flowData_transformed_asinh_dn[1:3],
+  # Input options:
+  compensate = FALSE,
+  transform = FALSE,
+  scale = FALSE,
+  # SOM options:
+  colsToUse = param,
+  xdim = 7,
+  ydim = 7,
+  nClus = 10
+  )
+
+PlotStars(fSOM[[1]], backgroundValues = as.factor(fSOM[[2]]))
+```
+
+## FlowSOM - fig2
+```{r, include=TRUE, dpi = 500}
+PlotMarker(fSOM[[1]], param[3])
+```
+
+# Cytometric fingerprinting {.tabset}
+
+## PhenoGMM
+
+```{r, include=TRUE, dpi = 500}
+fp_gmm <-
+  PhenoGMM(
+    flowData_transformed_asinh_dn,
+    param = param,
+    downsample = 1e2,
+    auto_nG = TRUE,
+    nG = 32,
+    diagnostic_plot = TRUE
+  )
+
+# Calculate diversity indices
+div_gmm <- Diversity_gmm(fp_gmm, R = 10)
+
+# Merge with metadata
+div_gmm <- left_join(div_gmm, metadata, by = "Sample_names")
+```
+
+```{r, include=TRUE, dpi = 500, fig.width = 10, fig.height = 5}
+# Plot results
+div_gmm %>% 
+  ggplot(., aes(x = Timepoint,  y = D2, fill = Treatment))+
+  geom_point(shape = 21, size = 4)+
+  geom_line()+
+  facet_wrap(.~Treatment, scales = "free_x", ncol = 3)+
+  scale_fill_brewer("", palette = "Accent")+
+  theme_bw()+
+  theme(strip.text = element_text(size = 8))+
+  labs(y = "Hill diversity index (D2)")
+
+```
+
+## PhenoFlow
+
+```{r, include=TRUE, dpi = 500}
+# Summary of max intensity values across data set
+summary <-
+  fsApply(
+    x = flowData_transformed_asinh_dn,
+    FUN = function(x)
+      apply(x, 2, max),
+    use.exprs = TRUE
+  )
+maxval <- max(summary[, "FL 4 Log"])
+
+# Normalize intensities to [0,1] range for density estimation
+mytrans <- function(x)
+  x / maxval
+flowData_transformed_asinh_dn_trans <-
+  transform(
+    flowData_transformed_asinh_dn,
+    `FS Log` = mytrans(`FS Log`),
+    `SS Log` = mytrans(`SS Log`),
+    `FL 4 Log` = mytrans(`FL 4 Log`)
+  )
+
+# Estimate kernel densities across grids
+fp_grid <-
+  flowBasis(
+    FCS_resample(flowData_transformed_asinh_dn_trans, 1e3),
+    param = param,
+    nbin = 128
+  )
+
+# Perform ordination analysis
+beta_fp <- beta_div_fcm(x = fp_grid, ord.type = "PCoA")
+beta_fp <- data.frame(Sample_names = rownames(beta_fp$points), beta_fp$points)
+beta_fp <- left_join(beta_fp, metadata, by = "Sample_names")
+```
+
+```{r, include=TRUE, dpi = 500, fig.width = 8, fig.height = 5}
+# Plot results
+beta_fp %>% 
+  ggplot(., aes(x = X1,  y = X2, fill = Treatment))+
+  geom_point(shape = 21, size = 4)+
+  # facet_wrap(.~Treatment, ncol = 3)+
+  scale_fill_brewer("", palette = "Accent")+
+  theme_bw()+
+  labs(x = "PCoA 1", y = "PCoA 2")+
+  theme(strip.text = element_text(size = 8))
+```
+
+## FlowFP
+
+FlowFP does not seem to run in the current R and RStudio version. Example code
+below in any case.
+
+```{r, include=TRUE}
+# fp_FP <-
+#   flowFPModel(
+#     fcs = FCS_resample(flowData_transformed_asinh_dn, 1e3),
+#     param = param,
+#     nRecursions = 8
+#   )
+```
+
+## FlowEMMi
+
+```{r, include=TRUE}
+# fp_emmi <-
+#   flowEMMi(
+#     frame = flowData_transformed_asinh_dn[[1]],
+#     ch1 = param[1],
+#     ch2 = param[3],
+#     sample_size = 1,
+#     prior = FALSE,
+#     separation = TRUE,
+#     max_inits = 10,
+#     use_log = FALSE,
+#     alpha = .7,
+#     img_format = "png",
+#     foreground_maxsd = 5000,
+#     start_cluster = 2,
+#     end_cluster = 12
+#   )
+```
+
+# Session info
+
+```{r, include=TRUE}
+sessionInfo()
+```
